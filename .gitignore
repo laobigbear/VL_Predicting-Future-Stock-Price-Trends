@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+checkpoints/
+logs/
+outputs/
+data/raw/
+*.parquet
+uv.lock
