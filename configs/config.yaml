@@ -1,0 +1,150 @@
+# =============================================================================
+# 股價趨勢預測研究實驗設定檔
+# 使用者只需修改此檔案，無需改動任何程式碼
+# 執行方式：uv run python main.py
+# =============================================================================
+
+# ── 資料爬取 ────────────────────────────────────────────────────────────────
+data_collection:
+  twse:
+    start_date: "20100101"   # TWSE 格式：YYYYMMDD
+    end_date: "20251231"
+    output_dir: "data/raw/twse"
+    sleep_sec: 0.5           # 請求間隔（秒），避免被限流
+    max_retries: 3
+
+  prices:
+    start_date: "2010-01-01" # Yahoo Finance 格式：YYYY-MM-DD
+    end_date: "2025-12-31"
+    output_dir: "data/raw/prices"
+    sleep_sec: 0.3
+    # 留空則自動載入 data/taiex_components.csv；
+    # 若 CSV 不存在則使用內建 20 支代表性成分股做 smoke test
+    tickers: []
+
+# ── 特徵工程 ─────────────────────────────────────────────────────────────────
+features:
+  # 技術指標
+  ma_windows: [5, 20, 60]
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  bb_window: 20
+  bb_std: 2.0
+  atr_period: 14
+
+  # 法人累計淨買超滾動窗口（日）
+  cnbs_windows: [5, 20]
+
+  # 滾動 Z-Score 正規化（防前視偏差）
+  zscore_window: 252         # 1 年交易日
+  zscore_min_periods: 63    # 最少 3 個月才開始正規化
+
+  # 目標變數
+  horizons: [1, 5, 20]      # 預測未來 1/5/20 日趨勢
+  threshold_pct: 1.5        # ±1.5% 判定上漲/下跌；中間為持平
+
+# ── Walk-Forward 驗證 ────────────────────────────────────────────────────────
+walk_forward:
+  train_start: "2010-01-01"  # 訓練集起點（Expanding Window 固定）
+  val_start: "2021-01-01"    # 第一個測試窗口的起點
+  test_end: "2025-12-31"
+  lookback: 40               # 輸入序列長度（交易日）
+  step_size: 63              # 每步向前滾動（約 3 個月）
+  val_size: 126              # 驗證集大小（約 6 個月）
+  horizon: 5                 # 此處預測目標（覆蓋 features.horizons，訓練用）
+  batch_size: 64
+  num_workers: 0             # Windows 建議 0；Linux 可設 4
+
+# ── 模型設定 ─────────────────────────────────────────────────────────────────
+model:
+  # 主要使用的模型；消融實驗會依序跑所有模型
+  # 可選：lstm_b1 | lstm_b2 | gru | transformer_b4 | transformer_resnet | gated_transformer
+  name: "transformer_resnet"
+  num_classes: 3             # 固定：下跌(0) / 持平(1) / 上漲(2)
+
+  lstm:
+    hidden_size: 128
+    dropout: 0.2
+
+  gru:
+    hidden_size: 128
+    dropout: 0.2
+
+  transformer:               # 適用 transformer_b4 與 transformer_resnet
+    d_model: 128
+    nhead: 8
+    num_encoder_layers: 4    # transformer_b4 使用 2；transformer_resnet 使用 4
+    dim_feedforward: 512
+    dropout_attn: 0.1
+    dropout_ff: 0.2
+    max_seq_len: 40
+    resnet_every_n: 2        # 每幾層加 ResNet skip（transformer_resnet 才用）
+
+  gated_transformer:
+    d_model: 128
+    nhead: 8
+    num_encoder_layers: 4
+    dim_feedforward: 512
+    dropout_attn: 0.1
+    dropout_ff: 0.2
+    max_seq_len: 40
+    resnet_every_n: 2
+    n_regimes: 3             # Markov 狀態數：Bull / Sideways / Bear
+    d_gate: 32               # Gate Network 隱層維度
+    fixed_gate: false
+
+  xgboost:
+    n_estimators: 500
+    max_depth: 5
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 3
+    reg_alpha: 0.1
+    reg_lambda: 5.0
+    cv_folds: 3
+
+# ── 訓練超參數 ────────────────────────────────────────────────────────────────
+training:
+  optimizer: "adamw"         # adamw | adam
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  t_max: 50                  # CosineAnnealingLR 週期
+  epochs: 100
+  early_stopping_patience: 20  # Transformer 用 20；RNN 建議改為 10
+  seed: 42
+  device: "auto"             # cuda | cpu | auto（自動偵測 GPU）
+
+# ── 回測參數 ──────────────────────────────────────────────────────────────────
+backtest:
+  risk_free_annual: 0.015    # 年化無風險利率 1.5%
+  trading_days: 252
+  tx_cost: 0.001425          # 買賣各 0.1425% 手續費
+  tx_tax: 0.003              # 賣出 0.3% 交易稅
+
+# ── SHAP 分析 ─────────────────────────────────────────────────────────────────
+shap:
+  n_background: 100          # DeepExplainer 背景樣本數
+  n_explain: 200             # 待解釋樣本數
+  seed: 42
+
+# ── Markov Regime Switching ───────────────────────────────────────────────────
+markov:
+  n_regimes: 3               # Bull / Sideways / Bear
+  endog_col: "taiex_log_ret"
+  k_ar_diff: 0
+  switching_variance: true
+  max_iter: 1000
+  em_tol: 1.0e-6
+  random_state: 42
+
+# ── 輸出路徑 ──────────────────────────────────────────────────────────────────
+paths:
+  raw_data: "data/raw"
+  processed_data: "data/processed"
+  checkpoints: "checkpoints"
+  logs: "logs"
+  outputs: "outputs"
+  taiex_components: "data/taiex_components.csv"
