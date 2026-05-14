@@ -240,22 +240,12 @@ def run_train(
     *,
     smoke: bool = False,
 ) -> None:
-    """呼叫 training/train.py 執行單一模型訓練。"""
+    """執行 Walk-forward 訓練。"""
+    from training.walk_forward_runner import run as wf_run
+
     _header("STEP 4／5  模型訓練")
     model, dev, s = _resolve_model_device_seed(cfg, model_name, device, seed)
-    cmd = [
-        sys.executable, "-m", "training.train",
-        "--model", model,
-        "--device", dev,
-        "--seed", str(s),
-    ]
-    if smoke:
-        cmd.append("--smoke")
-    print(f"[RUN] {' '.join(cmd)}")
-    result = subprocess.run(cmd)
-    if result.returncode != 0:
-        print(f"[ERROR] 訓練失敗，returncode={result.returncode}", file=sys.stderr)
-        sys.exit(result.returncode)
+    wf_run(cfg, model, dev, s, smoke=smoke)
     print(f"[DONE] 訓練完成：{model}")
 
 

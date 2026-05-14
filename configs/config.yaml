@@ -140,6 +140,13 @@ markov:
   em_tol: 1.0e-6
   random_state: 42
 
+# ── Weights & Biases ──────────────────────────────────────────────────────────
+wandb:
+  enabled: true
+  project: "stock-prediction"   # W&B 專案名稱
+  entity: null                  # W&B 帳號或 team（null = 使用預設）
+  upload_artifact: true         # 是否上傳 checkpoint 為 Artifact
+
 # ── 輸出路徑 ──────────────────────────────────────────────────────────────────
 paths:
   raw_data: "data/raw"

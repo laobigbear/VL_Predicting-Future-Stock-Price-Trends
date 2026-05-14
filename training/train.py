@@ -26,6 +26,19 @@ from torch.optim import Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+
+try:
+    import wandb as _wandb
+    _HAS_WANDB = True
+except ImportError:
+    _HAS_WANDB = False
+
+
+def _wlog(metrics: dict, step: int) -> None:
+    """Log to W&B if a run is active."""
+    if _HAS_WANDB and _wandb.run is not None:
+        _wandb.log(metrics, step=step)
 
 
 @dataclass
@@ -124,6 +137,7 @@ def run_epoch(
     smoke: bool = False,
     smoke_batches: int = 2,
     train: bool = True,
+    pbar: tqdm | None = None,
 ) -> tuple[float, float]:
     """Run one epoch; return (avg_loss, macro_f1)."""
     model.train() if train else model.eval()
@@ -131,9 +145,20 @@ def run_epoch(
     all_preds: list[np.ndarray] = []
     all_labels: list[np.ndarray] = []
 
+    phase = "train" if train else "val"
+    n_batches = min(smoke_batches, len(loader)) if smoke else len(loader)
+    batch_bar = tqdm(
+        loader,
+        desc=f"  {phase}",
+        total=n_batches,
+        leave=False,
+        unit="batch",
+        dynamic_ncols=True,
+    ) if train else loader  # batch bar only for train phase
+
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
-        for batch_idx, batch in enumerate(loader):
+        for batch_idx, batch in enumerate(batch_bar if train else loader):
             if smoke and batch_idx >= smoke_batches:
                 break
 
@@ -151,6 +176,8 @@ def run_epoch(
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
+                if isinstance(batch_bar, tqdm):
+                    batch_bar.set_postfix({"loss": f"{loss.item():.4f}"})
 
             total_loss += loss.item()
             preds = logits.argmax(dim=-1).cpu().numpy()
@@ -228,41 +255,49 @@ def train(
     is_gated = cfg.model_name == "gated_transformer"
     epochs = 1 if smoke else cfg.epochs
 
-    for epoch in range(epochs):
+    epoch_bar = tqdm(
+        range(epochs),
+        desc=f"[{run_label}]",
+        unit="ep",
+        dynamic_ncols=True,
+    )
+
+    for epoch in epoch_bar:
         tr_loss, tr_f1 = run_epoch(
-            model,
-            train_loader,
-            criterion,
-            optimizer,
-            device,
-            is_gated=is_gated,
-            smoke=smoke,
-            smoke_batches=cfg.smoke_batches,
-            train=True,
+            model, train_loader, criterion, optimizer, device,
+            is_gated=is_gated, smoke=smoke, smoke_batches=cfg.smoke_batches, train=True,
         )
         val_loss, val_f1 = run_epoch(
-            model,
-            val_loader,
-            criterion,
-            optimizer,
-            device,
-            is_gated=is_gated,
-            smoke=smoke,
-            smoke_batches=cfg.smoke_batches,
-            train=False,
+            model, val_loader, criterion, optimizer, device,
+            is_gated=is_gated, smoke=smoke, smoke_batches=cfg.smoke_batches, train=False,
         )
         scheduler.step()
 
         writer.add_scalars("loss", {"train": tr_loss, "val": val_loss}, epoch)
         writer.add_scalars("macro_f1", {"train": tr_f1, "val": val_f1}, epoch)
 
-        if (epoch + 1) % 10 == 0 or smoke:
-            print(
-                f"[Epoch {epoch + 1:03d}] loss={tr_loss:.4f}/{val_loss:.4f}  f1={tr_f1:.4f}/{val_f1:.4f}"
-            )
+        lr_now = scheduler.get_last_lr()[0]
+        _wlog({
+            "train/loss": tr_loss, "val/loss": val_loss,
+            "train/macro_f1": tr_f1, "val/macro_f1": val_f1,
+            "lr": lr_now,
+        }, step=epoch)
 
-        if stopper.step(val_f1, model):
-            print(f"[EarlyStopping] epoch={epoch + 1}, best_val_f1={stopper.best_score:.4f}")
+        early_stop = stopper.step(val_f1, model)
+        epoch_bar.set_postfix({
+            "tr_loss": f"{tr_loss:.4f}",
+            "val_loss": f"{val_loss:.4f}",
+            "tr_f1": f"{tr_f1:.4f}",
+            "val_f1": f"{val_f1:.4f}",
+            "best": f"{stopper.best_score:.4f}",
+            "pat": f"{stopper.counter}/{cfg.early_stopping_patience}",
+        })
+
+        if early_stop:
+            epoch_bar.write(
+                f"[EarlyStopping] epoch={epoch + 1}/{epochs}  "
+                f"best_val_f1={stopper.best_score:.4f}"
+            )
             break
 
     stopper.restore_best(model)
@@ -272,6 +307,14 @@ def train(
     ckpt_path = ckpt_dir / f"{run_label}_best.pt"
     torch.save(model.state_dict(), ckpt_path)
     print(f"[Saved] {ckpt_path}")
+
+    # W&B: log summary + upload artifact
+    if _HAS_WANDB and _wandb.run is not None:
+        _wandb.summary["best_val_f1"] = stopper.best_score
+        if _wandb.run.config.get("upload_artifact", True):
+            artifact = _wandb.Artifact(f"model-{run_label}", type="model")
+            artifact.add_file(str(ckpt_path))
+            _wandb.log_artifact(artifact)
 
     return model
 

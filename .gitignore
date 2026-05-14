@@ -26,14 +26,14 @@ ENV/
 # uv.lock 留存以確保可重現安裝（需要的話取消以下註解）
 # uv.lock
 
-# # ── 資料目錄（體積大，不納入版控）───────────────────────────────────────────────
-# data/raw/
-# data/processed/
-# *.parquet
-# *.csv.gz
-# *.feather
-# *.h5
-# *.hdf5
+# ── 資料目錄（體積大，不納入版控）────────────────────────────────────────────────
+data/raw/
+data/processed/
+*.parquet
+*.csv.gz
+*.feather
+*.h5
+*.hdf5
 
 # 例外：stock 清單 CSV 可納入版控（取消下方行首 # 即可）
 # !data/taiex_components.csv

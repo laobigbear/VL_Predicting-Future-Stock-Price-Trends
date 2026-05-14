@@ -43,12 +43,17 @@ uv run python main.py --mode ablation
 
 # 消融實驗快速驗證
 uv run python main.py --mode ablation --smoke
+
+# 偵測 GPU / CUDA，自動更新 pyproject.toml（第一次使用請先執行）
+uv run python tools/env_check.py
+uv run python tools/env_check.py --dry-run  # 僅預覽，不寫入
 ```
 
 ### 執行模式一覽
 
 | `--mode` | 執行內容 | 適用時機 |
 |---------|---------|---------|
+| `env` | 偵測 GPU/CUDA，更新 pyproject.toml 至最適 PyTorch build | **第一次使用前先執行** |
 | `pipeline`（預設）| 爬蟲 → 下載 → 特徵工程 → 訓練 | 第一次執行完整實驗 |
 | `crawl` | 僅爬取 TWSE 三大法人資料 | 定期更新最新法人資料 |
 | `download` | 僅下載個股 OHLCV + 總經指標 | 補抓缺失股票資料 |
@@ -128,30 +133,49 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ### 1.3 安裝專案依賴
 
-```bash
-# 進入 phase3_code 目錄
-cd phase3_code
+**步驟 1：評估 GPU / CUDA 環境（重要，請先執行）**
 
-# 安裝所有依賴（依 pyproject.toml，含 dev 工具）
+```bash
+uv run python tools/env_check.py
+```
+
+腳本會自動偵測 NVIDIA GPU 與驅動版本，選擇最適合的 PyTorch CUDA build，並更新 `pyproject.toml`。
+
+**步驟 2：安裝所有依賴**
+
+```bash
 uv sync --all-groups
 ```
+
+> **注意：** 若無 NVIDIA GPU，腳本會選擇 CPU 版 PyTorch，不需額外操作。  
+> **首次執行** `tools/env_check.py` 前，請先安裝基礎環境：`uv sync`，讓 uv 可以執行 Python。
 
 主要依賴套件（由 `pyproject.toml` 管理）：
 
 ```
-torch>=2.1          # 深度學習框架
-torchvision>=0.16   # 影像處理（備用）
-numpy>=1.24         # 數值計算
-pandas>=2.0         # 資料處理
-scikit-learn==1.3.2 # 機器學習工具（固定版本避免 API 破壞）
-xgboost>=2.0        # XGBoost 基準模型
-statsmodels>=0.14   # Markov Regime Switching（延伸 B 需要）
-shap>=0.44          # SHAP 可解釋性分析
-yfinance>=0.2       # Yahoo Finance 資料下載
-scipy>=1.11         # DM Test 統計運算
-matplotlib>=3.7     # 視覺化
-tensorboard>=2.13   # 訓練曲線記錄
+torch>=2.0,<2.1    # CUDA 11.7 → cu117 build（由 env_check.py 自動設定）
+torchvision>=0.15  # 配合 torch 版本（由 env_check.py 自動調整）
+numpy>=1.24
+pandas>=2.0
+pyarrow>=24.0.0    # Parquet 讀寫（必要）
+scikit-learn==1.3.2
+xgboost>=2.0
+statsmodels>=0.14
+shap>=0.44
+yfinance>=0.2
+scipy>=1.11
+matplotlib>=3.7
+tensorboard>=2.13
 ```
+
+> **PyTorch CUDA 版本對照：**
+> | GPU 驅動版本 | CUDA 支援 | PyTorch build | torch 版本約束 |
+> |-------------|---------|--------------|--------------|
+> | ≥ 527.41 | 12.4+ | cu124 | >=2.1 |
+> | ≥ 527.41 | 12.1+ | cu121 | >=2.1 |
+> | ≥ 522.06 | 11.8+ | cu118 | >=2.1 |
+> | ≥ 516.94 | 11.7 | cu117 | >=2.0,<2.1 |
+> | 無 GPU | — | cpu | >=2.1 |
 
 ### 1.4 匯出 requirements.txt（供 Colab 等環境使用）
 
@@ -411,6 +435,65 @@ for step in splitter.steps():
 
 ---
 
+### 2.5 工具腳本（`tools/`）
+
+#### `tools/env_check.py` — GPU/CUDA 環境評估
+
+偵測 NVIDIA GPU 驅動與 CUDA 版本，自動更新 `pyproject.toml` 並給出安裝指令。
+
+```bash
+# 評估並更新 pyproject.toml（執行後需 uv sync）
+uv run python tools/env_check.py
+
+# 僅預覽，不寫入檔案
+uv run python tools/env_check.py --dry-run
+```
+
+輸出範例：
+```
+==============================================================
+  PyTorch 環境評估報告
+==============================================================
+  Python : 3.11.4
+  OS     : Windows 10
+
+  GPU    : NVIDIA GeForce MX450  (2048 MB VRAM)
+  Driver : 517.00
+  CUDA   : 11.7  ← driver 支援上限
+
+  [OK]  目前 PyTorch : 2.0.1+cu117  (tag=cu117)
+  [OK]  建議 tag     : cu117  (torch >=2.0,<2.1)
+
+  [OK]  PyTorch 版本符合，CUDA 加速已啟用
+==============================================================
+```
+
+---
+
+#### `tools/view_stock.py` — 查看下載的 Parquet 資料
+
+快速檢視 `data/raw/` 下的個股或總經 Parquet 檔案。
+
+```bash
+# 列出所有可用股票與總經代碼
+uv run python tools/view_stock.py --list
+
+# 查看前 10 筆（預設）
+uv run python tools/view_stock.py 2330
+
+# 查看最後 20 筆
+uv run python tools/view_stock.py 2330 --tail -n 20
+
+# 統計摘要（min, max, mean, std 等）
+uv run python tools/view_stock.py 2330 --stats
+
+# 查看總經指標
+uv run python tools/view_stock.py TAIEX
+uv run python tools/view_stock.py VIX
+```
+
+---
+
 ## 3. 模型訓練
 
 ### 3.1 支援的模型與 `--model` 參數
@@ -468,6 +551,17 @@ uv run python models/xgboost_model.py
 ---
 
 ### 3.3 深度學習模型（`training/train.py`）
+
+訓練透過 `training/walk_forward_runner.py` 統一執行，由 `main.py` 自動呼叫。`train.py` 提供底層訓練迴圈，`walk_forward_runner.py` 負責：
+1. 載入 `data/processed/` 下的特徵 Parquet 檔
+2. 依 Walk-forward 切割建立 DataLoader
+3. 對每個時間窗口呼叫 `train()` 並儲存 checkpoint
+
+**建議透過 `main.py` 執行，無需直接呼叫 `train.py`：**
+
+```bash
+uv run python main.py --mode train --model transformer_resnet --device cuda
+```
 
 #### 完整參數說明
 
@@ -1052,16 +1146,23 @@ RuntimeError: CUDA out of memory
 
 ---
 
-### Q5. TWSE 爬蟲被封鎖
+### Q5. TWSE 爬蟲被封鎖或回傳空資料
 
-**症狀：** 連續收到 HTTP 429 或 503 錯誤
+**症狀 1：** 連續收到 `[WARN] XXXXXXXX fetch failed after 3 attempts` 且速度很慢
+**症狀 2：** 爬取完成但 parquet 為 0 rows
+**症狀 3：** API 回傳 HTTP 307 + HTML 錯誤頁面
+
+**說明：**
+- TWSE T86 API 對特定日期（如假日、非常早期日期）回傳空內容，屬正常現象，爬蟲會直接跳過（不重試）
+- 若多個爬蟲程序同時執行，TWSE 可能暫時封鎖 IP（約 10–30 分鐘後自動解除）
+- 完整下載 2010–2025 約需 30–60 分鐘
 
 **解決方案：**
 
-1. 增加 `sleep_sec`（建議至少 1.0 秒）
-2. 分批爬取（縮小 `start_date` / `end_date` 範圍）
-3. 換用不同 IP 或使用 VPN
-4. TWSE 在開盤時段（9:00–13:30 台灣時間）限流較嚴，建議收盤後執行
+1. 等待 10–30 分鐘後重新執行（支援斷點續爬，不會重複下載已有日期）
+2. 增加 `sleep_sec`（建議 ≥ 1.0 秒）
+3. 分批爬取（縮小 `start_date` / `end_date` 範圍）
+4. 避免在開盤時段（9:00–13:30 台灣時間）執行
 
 ---
 
@@ -1091,3 +1192,33 @@ uv add "shap>=0.44"
 - 固定 `--seed 42`（預設值）
 - 使用相同的 Walk-forward 切割（`WalkForwardConfig` 參數不變）
 - PyTorch >= 2.1 在 CPU 上完全確定性；GPU 上受 cuDNN 演算法影響，建議設 `torch.backends.cudnn.benchmark = False`（已預設關閉）
+
+---
+
+### Q8. 如何確認 CUDA 加速是否啟用
+
+```bash
+uv run python -c "
+import torch
+print('PyTorch:', torch.__version__)
+print('CUDA available:', torch.cuda.is_available())
+if torch.cuda.is_available():
+    print('GPU:', torch.cuda.get_device_name(0))
+"
+```
+
+若顯示 `CUDA available: False`，請執行 `tools/env_check.py` 重新評估環境。
+
+---
+
+### Q9. NVIDIA 驅動版本不足
+
+**症狀：** `env_check.py` 顯示 `[!!] 驅動版本不足`
+
+**解決方案：**
+1. 前往 [NVIDIA Driver Downloads](https://www.nvidia.com/drivers) 更新驅動
+2. 更新後重新執行 `tools/env_check.py` → `uv sync`
+3. 各 CUDA 版本最低驅動需求：
+   - cu124 / cu121：≥ 527.41（Windows）
+   - cu118：≥ 522.06（Windows）
+   - cu117：≥ 516.94（Windows）
