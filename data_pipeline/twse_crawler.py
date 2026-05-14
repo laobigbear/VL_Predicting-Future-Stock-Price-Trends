@@ -62,23 +62,42 @@ def fetch_daily_institutional(
     Args:
         date_str: Date in YYYYMMDD format.
         session: Reusable requests.Session.
-        retries: Max retry attempts on HTTP failure.
+        retries: Max retry attempts on transient network failures.
 
     Returns:
         DataFrame with columns defined by _COLUMNS_INST, or empty DataFrame if no data.
     """
+    import json
+
     url = _TWSE_INST_URL.format(date=date_str)
+    _empty = pd.DataFrame(columns=_COLUMNS_INST + ["date"])
+
     for attempt in range(retries):
         try:
             resp = session.get(url, timeout=15)
             resp.raise_for_status()
-            payload = resp.json()
-            break
-        except Exception as exc:  # noqa: BLE001
+        except requests.exceptions.HTTPError:
+            # Non-2xx response — not recoverable by retrying
+            return _empty
+        except Exception as exc:  # noqa: BLE001 — network error, retriable
             if attempt == retries - 1:
                 print(f"[WARN] {date_str} fetch failed after {retries} attempts: {exc}")
-                return pd.DataFrame(columns=_COLUMNS_INST + ["date"])
+                return _empty
             time.sleep(2**attempt)
+            continue
+
+        text = resp.text.strip()
+        if not text:
+            # Empty body = no data for this date (non-retriable)
+            return _empty
+
+        try:
+            payload = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            # Server returned non-JSON (e.g. HTML error page) — non-retriable
+            return _empty
+
+        break
 
     if payload.get("stat") != "OK" or "data" not in payload:
         return pd.DataFrame(columns=_COLUMNS_INST + ["date"])
