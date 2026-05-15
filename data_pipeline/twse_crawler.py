@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from tqdm import tqdm
 
 
 @dataclass
@@ -153,12 +154,10 @@ def crawl_range(cfg: CrawlerConfig | None = None) -> pd.DataFrame:
     session.headers["User-Agent"] = "Mozilla/5.0 (research-bot)"
 
     frames: list[pd.DataFrame] = []
-    for i, date_str in enumerate(dates_to_fetch):
+    for date_str in tqdm(dates_to_fetch, desc="Crawling TWSE", unit="day"):
         df = fetch_daily_institutional(date_str, session, retries=cfg.max_retries)
         if not df.empty:
             frames.append(df)
-        if (i + 1) % 50 == 0:
-            print(f"[INFO] Progress: {i + 1}/{len(dates_to_fetch)}")
         time.sleep(cfg.sleep_sec)
 
     if frames:

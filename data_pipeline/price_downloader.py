@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
+from tqdm import tqdm
 
 
 @dataclass
@@ -21,6 +22,7 @@ class DownloadConfig:
     sleep_sec: float = 0.3
     # TWSE tickers use ".TW" suffix on Yahoo Finance
     tickers: list[str] = field(default_factory=list)
+    force_refresh: bool = False  # True 時忽略既有檔案，強制重新下載
 
 
 # 總經 / 指數 tickers
@@ -34,6 +36,46 @@ MACRO_TICKERS: dict[str, str] = {
 def _yf_ticker(stock_no: str) -> str:
     """Convert bare stock number to Yahoo Finance .TW format."""
     return f"{stock_no}.TW" if not stock_no.endswith(".TW") else stock_no
+
+
+def _coverage_check(
+    out_path: Path,
+    cfg_start: str,
+    cfg_end: str,
+    force: bool = False,
+) -> tuple[str | None, pd.DataFrame | None]:
+    """判斷是否需要下載，回傳 (fetch_start, existing_df)。
+
+    - fetch_start=None  → 已是最新，跳過
+    - fetch_start 有值 + existing_df=None  → 全新下載
+    - fetch_start 有值 + existing_df 有值  → 增量下載後 append
+    """
+    if force or not out_path.exists():
+        return cfg_start, None
+    try:
+        existing = pd.read_parquet(out_path)
+        if existing.empty:
+            return cfg_start, None
+        latest: pd.Timestamp = existing.index.max()
+        end_dt = pd.Timestamp(cfg_end)
+        if latest >= end_dt - pd.Timedelta(days=5):  # 5 天容差（含週末假日）
+            return None, existing
+        new_start = (latest + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        return new_start, existing
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] Cannot read {out_path}: {exc}. Re-downloading.")
+        return cfg_start, None
+
+
+def _merge_and_save(existing: pd.DataFrame | None, new_df: pd.DataFrame, out_path: Path) -> pd.DataFrame:
+    """Append new rows to existing data, deduplicate, and save."""
+    if existing is not None and not existing.empty:
+        combined = pd.concat([existing, new_df]).sort_index()
+        combined = combined[~combined.index.duplicated(keep="last")]
+    else:
+        combined = new_df.sort_index()
+    combined.to_parquet(out_path)
+    return combined
 
 
 def download_single(
@@ -85,8 +127,9 @@ def download_single(
 
 
 def download_stock_universe(cfg: DownloadConfig) -> dict[str, pd.DataFrame]:
-    """Download OHLCV for all tickers in cfg.tickers.
+    """Download OHLCV for all tickers in cfg.tickers（支援增量更新）。
 
+    已是最新的檔案直接跳過；缺漏期間的資料增量補抓後 append。
     Saves each stock as parquet: output_dir/stocks/{ticker}.parquet
     Returns dict mapping ticker -> DataFrame.
     """
@@ -94,33 +137,33 @@ def download_stock_universe(cfg: DownloadConfig) -> dict[str, pd.DataFrame]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     results: dict[str, pd.DataFrame] = {}
-    for i, stock_no in enumerate(cfg.tickers):
-        yf_ticker = _yf_ticker(stock_no)
+    skipped = 0
+
+    for stock_no in tqdm(cfg.tickers, desc="Stocks", unit="ticker"):
         out_path = out_dir / f"{stock_no}.parquet"
+        fetch_start, existing = _coverage_check(
+            out_path, cfg.start_date, cfg.end_date, force=cfg.force_refresh
+        )
 
-        if out_path.exists():
-            try:
-                results[stock_no] = pd.read_parquet(out_path)
-                continue
-            except Exception:  # noqa: BLE001
-                pass
+        if fetch_start is None:
+            results[stock_no] = existing  # type: ignore[assignment]
+            skipped += 1
+            continue
 
-        df = download_single(yf_ticker, cfg.start_date, cfg.end_date, sleep=cfg.sleep_sec)
+        df = download_single(_yf_ticker(stock_no), fetch_start, cfg.end_date, sleep=cfg.sleep_sec)
         if not df.empty:
-            df.to_parquet(out_path)
-            results[stock_no] = df
-
-        if (i + 1) % 50 == 0:
-            print(f"[INFO] Downloaded {i + 1}/{len(cfg.tickers)} stocks")
+            results[stock_no] = _merge_and_save(existing, df, out_path)
         time.sleep(cfg.sleep_sec)
 
-    print(f"[INFO] Stock download complete: {len(results)} tickers")
+    action = "skipped as up-to-date"
+    print(f"[INFO] Stocks done: {len(results)} total, {skipped} {action}")
     return results
 
 
 def download_macro(cfg: DownloadConfig) -> dict[str, pd.DataFrame]:
-    """Download TAIEX index, VIX, and USD/TWD exchange rate.
+    """Download TAIEX index, VIX, and USD/TWD exchange rate（支援增量更新）。
 
+    已是最新的指標直接跳過；缺漏期間的資料增量補抓後 append。
     Saves each as parquet: output_dir/macro/{name}.parquet
     Returns dict mapping name -> DataFrame.
     """
@@ -128,13 +171,23 @@ def download_macro(cfg: DownloadConfig) -> dict[str, pd.DataFrame]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     results: dict[str, pd.DataFrame] = {}
-    for name, ticker in MACRO_TICKERS.items():
+    for name, ticker in tqdm(MACRO_TICKERS.items(), desc="Macro", unit="series"):
         out_path = out_dir / f"{name}.parquet"
-        df = download_single(ticker, cfg.start_date, cfg.end_date, sleep=cfg.sleep_sec)
+        fetch_start, existing = _coverage_check(
+            out_path, cfg.start_date, cfg.end_date, force=cfg.force_refresh
+        )
+
+        if fetch_start is None:
+            print(f"[SKIP] {name}: already up-to-date")
+            results[name] = existing  # type: ignore[assignment]
+            continue
+
+        df = download_single(ticker, fetch_start, cfg.end_date, sleep=cfg.sleep_sec)
         if not df.empty:
-            df.to_parquet(out_path)
-            results[name] = df
-            print(f"[INFO] {name} ({ticker}): {len(df)} rows")
+            results[name] = _merge_and_save(existing, df, out_path)
+            total = len(results[name])
+            label = "appended" if existing is not None else "downloaded"
+            print(f"[INFO] {name} ({ticker}): {label}, {total} rows total")
         else:
             print(f"[WARN] {name} ({ticker}): empty result")
         time.sleep(cfg.sleep_sec)
