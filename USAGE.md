@@ -191,7 +191,7 @@ uv export --no-hashes > requirements.txt
 
 ### 2.1 `twse_crawler.py` — 爬取 TWSE 三大法人買賣超
 
-**功能：** 從 TWSE 公開資訊觀測站爬取每日三大法人（外資 FINI、投信 ITF、自營商 Dealer）買賣超資料。支援斷點續爬（resume）。
+**功能：** 從 TWSE 公開資訊觀測站爬取每日三大法人（外資 FINI、投信 ITF、自營商 Dealer）買賣超資料。支援斷點續爬（resume）與 tqdm 逐日進度條。
 
 **直接執行（smoke test，僅抓單日驗證連線）：**
 
@@ -215,6 +215,19 @@ df = crawl_range(cfg)
 print(df.shape)  # 預期: (數百萬筆, 16 欄)
 ```
 
+**執行時的進度輸出範例：**
+
+```
+[INFO] Resuming: 1200 dates already fetched.
+[INFO] Fetching 800 dates...
+Crawling TWSE: 100%|████████████| 800/800 [45:12<00:00,  3.39s/day]
+[INFO] Saved to data/raw/twse/institutional_trading.parquet (5823041 rows)
+```
+
+**斷點續爬（增量更新）行為：**
+- 已有 `institutional_trading.parquet` 時，自動讀取已爬日期並跳過，**只爬缺漏日期**
+- 二次執行（資料已最新）時印出 `[INFO] Fetching 0 dates...` 並立即結束，不發任何請求
+
 **輸出格式：**
 
 - 儲存路徑：`data/raw/twse/institutional_trading.parquet`
@@ -229,7 +242,7 @@ print(df.shape)  # 預期: (數百萬筆, 16 欄)
 
 ### 2.2 `price_downloader.py` — 下載 Yahoo Finance OHLCV
 
-**功能：** 下載個股及總經指標（TAIEX、VIX、美元/台幣）的每日 OHLCV 資料。
+**功能：** 下載個股及總經指標（TAIEX、VIX、美元/台幣）的每日 OHLCV 資料。支援增量更新與 tqdm 進度條，重複執行不會重複下載。
 
 **直接執行（smoke test，下載 TSMC 3 日資料）：**
 
@@ -257,14 +270,43 @@ cfg = DownloadConfig(
     output_dir="data/raw/prices",
     sleep_sec=0.3,
     tickers=tickers,
+    force_refresh=False,  # True 時忽略既有檔案，強制從頭重新下載
 )
 
-# 下載個股 OHLCV
+# 下載個股 OHLCV（含增量更新與 tqdm 進度條）
 stock_data = download_stock_universe(cfg)
 # stock_data: dict，key 為股票代號，value 為 DataFrame
 
 # 下載總經指標（TAIEX 指數、VIX、美元/台幣匯率）
 macro_data = download_macro(cfg)
+```
+
+**增量更新行為（個股與總經指標均適用）：**
+
+| 情境 | 判斷條件 | 行為 |
+|------|---------|------|
+| 全新下載 | 本地無檔案 | 從 `start_date` 完整下載 |
+| 已是最新 | 檔案最新日期 ≥ `end_date` − 5 天 | 印出 `[SKIP]`，直接讀取既有資料 |
+| 增量補抓 | 檔案存在但有缺漏期間 | 只下載最新日期之後的資料，append 後存檔 |
+
+> `force_refresh=True` 可強制忽略上述判斷，從頭重新下載所有資料。
+
+**執行時的進度輸出範例：**
+
+```
+# 個股（首次執行）
+Stocks: 100%|████████████| 50/50 [08:23<00:00, 10.07s/ticker]
+[INFO] Stocks done: 50 total, 0 skipped as up-to-date
+
+# 個股（二次執行，資料已最新）
+Stocks: 100%|████████████| 50/50 [00:02<00:00, 23.14ticker/s]
+[INFO] Stocks done: 50 total, 50 skipped as up-to-date
+
+# 總經指標（資料已最新）
+Macro: 100%|████████████| 3/3 [00:00<00:00, 44.6series/s]
+[SKIP] TAIEX: already up-to-date
+[SKIP] VIX: already up-to-date
+[SKIP] USDTWD: already up-to-date
 ```
 
 **股票代號格式：**
